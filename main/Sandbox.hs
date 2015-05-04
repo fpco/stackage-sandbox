@@ -22,7 +22,7 @@ import System.FilePath (addTrailingPathSeparator)
 import System.IO (hPutStrLn, stderr)
 import System.IO.Error (isDoesNotExistError)
 import System.Process (callProcess, readProcess)
-import qualified Paths_stackage_cli as CabalInfo
+import qualified Paths_stackage_sandbox as CabalInfo
 
 type Snapshot = Text
 type Package = Text
