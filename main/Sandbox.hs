@@ -1,16 +1,28 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Main where
 
-import Control.Exception (Exception, bracket_, catch, throwIO)
+import Conduit
+import Control.Exception (Exception, bracket_, catch, throwIO, evaluate)
 import Control.Monad (when)
+import Data.Attoparsec.ByteString ((<?>))
+import qualified Data.Attoparsec.ByteString as Parse
+import qualified Data.Attoparsec.ByteString.Char8 as Parse
+import Data.ByteString (ByteString)
+import Data.Conduit.Attoparsec (conduitParserEither)
+import Data.IORef (newIORef, readIORef, modifyIORef)
+import qualified Data.List as List
 import Data.Maybe
 import Data.Monoid
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
+import qualified Data.Text.Lazy.Builder as Builder
+import qualified Data.Text.Lazy.Builder.Int as Builder
+import qualified Data.Text.Lazy as LText
 import Data.Typeable (Typeable)
 import Filesystem.Path.CurrentOS as Path
 import Filesystem
@@ -23,6 +35,7 @@ import System.IO (hPutStrLn, stderr)
 import System.IO.Error (isDoesNotExistError)
 import System.Process (callProcess, readProcess)
 import qualified Paths_stackage_sandbox as CabalInfo
+import Prelude hiding (FilePath)
 
 type Snapshot = Text
 type Package = Text
@@ -139,7 +152,8 @@ sandboxVerify = do
       when (not $ T.isPrefixOf snapshotDirText packageDb) $ do
         throwIO $ PackageDbLocMismatch snapshotDirText packageDb
     else do
-      throwIO $ MissingConfig cabalConfigExists cabalSandboxConfigExists
+      --throwIO $ MissingConfig cabalConfigExists cabalSandboxConfigExists
+      return () -- MissingConfig is now ok.
 
 getGhcVersion :: IO Text
 getGhcVersion = do
@@ -155,8 +169,12 @@ sandboxInit msnapshot = do
     throwIO ConfigAlreadyExists
 
   cabalConfigExists <- isFile "cabal.config"
-  when (not cabalConfigExists) $ do
-    runStackagePlugin "init" (mSnapshotToArgs msnapshot)
+  configAdded <- if (not cabalConfigExists)
+    then do
+      runStackagePlugin "init" (mSnapshotToArgs msnapshot)
+      return True
+    else
+      return False
 
   configSnapshot <- parseConfigSnapshot
   snapshot <- case msnapshot of
@@ -169,6 +187,8 @@ sandboxInit msnapshot = do
   dir <- getSnapshotDir snapshot
   createTree dir
   cabalSandboxInit dir
+  appendFileToFile "cabal.config" "cabal.sandbox.config"
+  when configAdded $ removeFile "cabal.config"
   sandboxVerify
 
 getHome :: IO Text
@@ -289,7 +309,8 @@ sandboxUpgrade mSnapshot = do
 
   snapshot <- downloadSnapshot mSnapshot
 
-  when (Just snapshot == mConfigSnapshot && cabalSandboxConfigExists) $ do
+  when ((Just snapshot == mConfigSnapshot || mConfigSnapshot == Nothing)
+        && cabalSandboxConfigExists) $ do
     packageDb <- getPackageDb
     snapshotDir <- getSnapshotDir snapshot
     snapshotDirText <- toText' snapshotDir
@@ -328,6 +349,142 @@ oldSandboxNotice = do
         T.putStrLn db
   T.putStrLn ""
 
+data PackageConstraint = PackageConstraint
+  { packageConstraintName :: Text
+  , packageConstraintConstraint :: Constraint
+  -- ^ Note(dan): I want to rename this
+  }
+  deriving Show
+
+data Constraint
+  = ConstraintVersionEq [Int]
+  | ConstraintInstalled
+  deriving Show
+
+-- Doesn't include newline
+displayConstraintLine :: PackageConstraint -> Text
+displayConstraintLine c
+    = "constraints: "
+   <> displayPackageConstraint c
+
+displayPackageConstraint :: PackageConstraint -> Text
+displayPackageConstraint (PackageConstraint name constraint) =
+  name <> " " <> case constraint of
+    ConstraintVersionEq ver -> "==" <> displayVersion ver
+    ConstraintInstalled -> "installed"
+
+-- TODO: efficiency?
+displayVersion :: [Int] -> Text
+displayVersion
+  = LText.toStrict
+  . Builder.toLazyText
+  . mconcat
+  . List.intersperse (Builder.singleton '.')
+  . map Builder.decimal
+
+-- Copies a cabal.config into a cabal.sandbox.config
+appendFileToFile :: FilePath -> FilePath -> IO ()
+appendFileToFile src dest = runResourceT
+   $ (sourceFile src :: Producer (ResourceT IO) ByteString)
+  $$ sinkIOHandle (openFile dest AppendMode)
+
+{-
+copyConstraints :: IO ()
+copyConstraints = runResourceT $
+  packageConstraintsProducer $$ packageConstraintsConsumer
+
+packageConstraintsProducer :: (MonadResource m, MonadIO m) => Producer m PackageConstraint
+packageConstraintsProducer
+   = sourceFile "cabal.config"
+  $= linesAsciiC filterPackageConstraintLine
+
+packageConstraintsConsumer :: (MonadResource m, MonadIO m) => Consumer PackageConstraint m ()
+packageConstraintsConsumer
+  --  yield "" to print an extra blank line
+   = (yield "" >> mapC displayConstraintLine)
+  =$ unlinesC
+  =$ sinkIOHandle (openFile "cabal.sandbox.config" AppendMode)
+
+
+linesAsciiC :: MonadIO m => (Int -> Conduit ByteString m b) -> Conduit ByteString m b
+linesAsciiC k = do
+  let getLineCount = return 0
+  -- for debugging, comment the above and uncomment the below
+  --lineCountRef <- liftIO $ newIORef (1 :: Int)
+  --let getLineCount = liftIO $ do
+  --      lineCount <- readIORef lineCountRef
+  --      modifyIORef lineCountRef (+1)
+  --      evaluate lineCount
+
+  peekForever $ do
+    lineCount <- getLineCount
+    lineAsciiC (k lineCount)
+
+filterPackageConstraintLine :: MonadIO m => Int -> Conduit ByteString m PackageConstraint
+filterPackageConstraintLine line
+    = conduitParserEither constraintLineParser
+  =$= filterRightSnd
+  where
+    filterRightSnd = awaitForever $ \case
+      Left _e -> do
+        -- for debugging, uncomment the below
+        -- (The first 4 lines of a stackage cabal.config are expected to fail)
+        -- (while the rest are expected to succeed)
+        --liftIO $ do
+        --  putStrLn $ "Error parsing line: " <> show line
+        --  print _e
+        return ()
+      Right (_, a) -> yield a
+
+-- TODO: use or move to stackage-common
+constraintLineParser :: Parse.Parser PackageConstraint
+constraintLineParser
+   = Parse.skipSpace
+  *> optional (Parse.string "constraints:" <* Parse.skipSpace)
+  *> packageConstraintParser
+  <* optional Parse.skipSpace
+  <* optional (Parse.char ',' <* Parse.skipSpace)
+  <?> "constraintLineParser"
+
+packageConstraintParser :: Parse.Parser PackageConstraint
+packageConstraintParser
+    = PackageConstraint
+  <$> (packageNameParser <* Parse.skipSpace)
+  <*> versionConstraintParser
+  <?> "packageConstraintParser"
+
+packageNameParser :: Parse.Parser Text
+packageNameParser
+   = T.pack -- TODO: efficiency?
+  <$> packageNameStringParser
+  <?> "packageNameParser"
+  where
+    packageNameStringParser
+        = (:)
+      <$> Parse.letter_iso8859_15
+      <*> many packageNameValidCharParser
+
+
+packageNameValidCharParser :: Parse.Parser Char
+packageNameValidCharParser
+    = Parse.letter_iso8859_15
+  <|> Parse.digit
+  <|> Parse.char '-'
+  <?>"packageNameValidCharParser"
+
+-- TODO: more than just ==
+versionConstraintParser :: Parse.Parser Constraint
+versionConstraintParser
+    = (ConstraintVersionEq <$>
+        (Parse.string "==" *> versionParser))
+  <|> (Parse.string "installed" *> pure ConstraintInstalled)
+  <?> "versionConstraintParser"
+
+versionParser :: Parse.Parser [Int]
+versionParser
+     = Parse.decimal `Parse.sepBy1` Parse.char '.'
+  <?> "versionParser"
+-}
 
 handleSandboxExceptions :: SandboxException -> IO ()
 handleSandboxExceptions NoHomeEnvironmentVariable = do
