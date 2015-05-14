@@ -1,3 +1,8 @@
+## 0.1.2
+
+* Migrated off of system-filepath and system-fileio
+  in favor of filepath and directory.
+
 ## 0.1.1
 
 * Added an associated library (stubbed)

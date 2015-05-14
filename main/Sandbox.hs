@@ -24,18 +24,16 @@ import qualified Data.Text.Lazy.Builder as Builder
 import qualified Data.Text.Lazy.Builder.Int as Builder
 import qualified Data.Text.Lazy as LText
 import Data.Typeable (Typeable)
-import Filesystem.Path.CurrentOS as Path
-import Filesystem
 import Options.Applicative hiding (header, progDesc)
 import Stackage.CLI
+import System.Directory
 import System.Environment (lookupEnv)
 import System.Exit
-import System.FilePath (addTrailingPathSeparator)
-import System.IO (hPutStrLn, stderr)
+import System.FilePath (addTrailingPathSeparator, (</>))
+import System.IO (hPutStrLn, stderr, openFile, IOMode(AppendMode))
 import System.IO.Error (isDoesNotExistError)
 import System.Process (callProcess, readProcess)
 import qualified Paths_stackage_sandbox as CabalInfo
-import Prelude hiding (FilePath)
 
 type Snapshot = Text
 type Package = Text
@@ -107,14 +105,9 @@ subcommands = do
   addCommand "delete" deleteDesc Delete (optional snapshotParser)
   addCommand "upgrade" upgradeDesc Upgrade (optional snapshotParser)
 
-toText' :: Path.FilePath -> IO Text
-toText' p = case toText p of
-  Left e -> throwIO $ DecodePathFail e
-  Right t -> return t
-
-cabalSandboxInit :: Path.FilePath -> IO ()
+cabalSandboxInit :: FilePath -> IO ()
 cabalSandboxInit dir = do
-  dirText <- toText' dir
+  let dirText = T.pack dir
   let args =
         [ "sandbox"
         , "init"
@@ -141,14 +134,14 @@ snapshotEq short full = T.isPrefixOf (T.replace "/" "-" short) full
 -- TODO: verify things about the packages in the sandbox
 sandboxVerify :: IO ()
 sandboxVerify = do
-  cabalConfigExists <- isFile "cabal.config"
-  cabalSandboxConfigExists <- isFile "cabal.sandbox.config"
+  cabalConfigExists <- doesFileExist "cabal.config"
+  cabalSandboxConfigExists <- doesFileExist "cabal.sandbox.config"
   if (cabalConfigExists && cabalSandboxConfigExists)
     then do
       packageDb <- getPackageDb
       snapshot <- parseConfigSnapshot
       snapshotDir <- getSnapshotDir snapshot
-      snapshotDirText <- toText' snapshotDir
+      let snapshotDirText = T.pack snapshotDir
       when (not $ T.isPrefixOf snapshotDirText packageDb) $ do
         throwIO $ PackageDbLocMismatch snapshotDirText packageDb
     else do
@@ -164,11 +157,11 @@ getGhcVersion = do
 
 sandboxInit :: Maybe Snapshot -> IO ()
 sandboxInit msnapshot = do
-  cabalSandboxConfigExists <- isFile "cabal.sandbox.config"
+  cabalSandboxConfigExists <- doesFileExist "cabal.sandbox.config"
   when cabalSandboxConfigExists $ do
     throwIO ConfigAlreadyExists
 
-  cabalConfigExists <- isFile "cabal.config"
+  cabalConfigExists <- doesFileExist "cabal.config"
   configAdded <- if (not cabalConfigExists)
     then do
       runStackagePlugin "init" (mSnapshotToArgs msnapshot)
@@ -185,7 +178,7 @@ sandboxInit msnapshot = do
   T.putStrLn $ "Initializing at snapshot: " <> snapshot
 
   dir <- getSnapshotDir snapshot
-  createTree dir
+  createDirectoryIfMissing True dir
   cabalSandboxInit dir
   appendFileToFile "cabal.config" "cabal.sandbox.config"
   when configAdded $ removeFile "cabal.config"
@@ -203,25 +196,25 @@ getHome = T.pack <$> do
         Just home -> return home
         Nothing -> throwIO NoHomeEnvironmentVariable
 
-getSnapshotDirPrefix :: IO Path.FilePath
+getSnapshotDirPrefix :: IO FilePath
 getSnapshotDirPrefix = do
   home <- getHome
   ghcVersion <- getGhcVersion
-  let dir = Path.fromText home </> ".stackage" </> "sandboxes"
-        </> Path.fromText ghcVersion
+  let dir = T.unpack home </> ".stackage" </> "sandboxes"
+        </> T.unpack ghcVersion
   return dir
 
-getSnapshotDir :: Snapshot -> IO Path.FilePath
+getSnapshotDir :: Snapshot -> IO FilePath
 getSnapshotDir snapshot = do
   dir <- getSnapshotDirPrefix
-  return $ dir </> Path.fromText snapshot
+  return $ dir </> T.unpack snapshot
 
 
 -- copied from Purge.hs, tweaked
 -- TODO: remove duplication
 parsePackageDb :: IO (Maybe Text)
 parsePackageDb = do
-  cabalSandboxConfigExists <- isFile "cabal.sandbox.config"
+  cabalSandboxConfigExists <- doesFileExist "cabal.sandbox.config"
   if cabalSandboxConfigExists
     then do
       t <- T.readFile "cabal.sandbox.config"
@@ -262,10 +255,10 @@ ghcPkgUnregister package = do
 
 sandboxDelete :: IO ()
 sandboxDelete = do
-  cabalConfigExists <- isFile "cabal.config"
+  cabalConfigExists <- doesFileExist "cabal.config"
   when cabalConfigExists $ do
     removeFile "cabal.config"
-  cabalSandboxConfigExists <- isFile "cabal.sandbox.config"
+  cabalSandboxConfigExists <- doesFileExist "cabal.sandbox.config"
   when cabalSandboxConfigExists $ do
     oldSandboxNotice
     removeFile "cabal.sandbox.config"
@@ -279,20 +272,20 @@ snapshotSanityCheck snapshot =
 sandboxDeleteSnapshot :: Snapshot -> IO ()
 sandboxDeleteSnapshot snapshot = do
   snapshotSanityCheck snapshot
-  getSnapshotDir snapshot >>= removeTree
+  getSnapshotDir snapshot >>= removeDirectoryRecursive
 
 -- Find the canonical name for a snapshot by looking it up on stackage.org.
 -- This can change over time. e.g. "lts" used to mean lts-1.0.
 downloadSnapshot :: Maybe Snapshot -> IO Snapshot
 downloadSnapshot mSnapshot = do
-  workingDir <- getWorkingDirectory
+  currentDir <- getCurrentDirectory
   let tempDir = ".stackage-sandbox-tmp"
       enterTempDir = do
-        createDirectory False tempDir
-        setWorkingDirectory tempDir
+        createDirectory tempDir
+        setCurrentDirectory tempDir
       exitTempDir = do
-        setWorkingDirectory workingDir
-        removeTree tempDir
+        setCurrentDirectory currentDir
+        removeDirectoryRecursive tempDir
   bracket_ enterTempDir exitTempDir $ do
     runStackagePlugin "init" (mSnapshotToArgs mSnapshot)
     parseConfigSnapshot
@@ -300,8 +293,8 @@ downloadSnapshot mSnapshot = do
 
 sandboxUpgrade :: Maybe Snapshot -> IO ()
 sandboxUpgrade mSnapshot = do
-  cabalConfigExists <- isFile "cabal.config"
-  cabalSandboxConfigExists <- isFile "cabal.sandbox.config"
+  cabalConfigExists <- doesFileExist "cabal.config"
+  cabalSandboxConfigExists <- doesFileExist "cabal.sandbox.config"
 
   mConfigSnapshot <- if cabalConfigExists
     then Just <$> parseConfigSnapshot
@@ -313,7 +306,7 @@ sandboxUpgrade mSnapshot = do
         && cabalSandboxConfigExists) $ do
     packageDb <- getPackageDb
     snapshotDir <- getSnapshotDir snapshot
-    snapshotDirText <- toText' snapshotDir
+    let snapshotDirText = T.pack snapshotDir
     if T.isPrefixOf snapshotDirText packageDb
       then do
         T.putStrLn $ "Already at snapshot: " <> snapshot
@@ -327,7 +320,7 @@ sandboxUpgrade mSnapshot = do
 getSandboxPrefix :: IO Text
 getSandboxPrefix = do
   dirPath <- getSnapshotDirPrefix
-  dirPathText <- toText' dirPath
+  let dirPathText = T.pack dirPath
   let viaString f = T.pack . f . T.unpack
   return $ viaString addTrailingPathSeparator dirPathText
 
