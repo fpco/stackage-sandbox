@@ -6,14 +6,14 @@
 module Main where
 
 import Conduit
-import Control.Exception (Exception, bracket_, catch, throwIO, evaluate)
+import Control.Exception (Exception, bracket_, catch, throwIO)
 import Control.Monad (when)
-import Data.Attoparsec.ByteString ((<?>))
-import qualified Data.Attoparsec.ByteString as Parse
-import qualified Data.Attoparsec.ByteString.Char8 as Parse
+--import Data.Attoparsec.ByteString ((<?>))
+--import qualified Data.Attoparsec.ByteString as Parse
+--import qualified Data.Attoparsec.ByteString.Char8 as Parse
 import Data.ByteString (ByteString)
-import Data.Conduit.Attoparsec (conduitParserEither)
-import Data.IORef (newIORef, readIORef, modifyIORef)
+--import Data.Conduit.Attoparsec (conduitParserEither)
+--import Data.IORef (newIORef, readIORef, modifyIORef)
 import qualified Data.List as List
 import Data.Maybe
 import Data.Monoid
@@ -24,14 +24,14 @@ import qualified Data.Text.Lazy.Builder as Builder
 import qualified Data.Text.Lazy.Builder.Int as Builder
 import qualified Data.Text.Lazy as LText
 import Data.Typeable (Typeable)
-import Options.Applicative hiding (header, progDesc)
+import Options.Applicative hiding (header, progDesc, short, action)
 import Stackage.CLI
 import System.Directory
 import System.Environment (lookupEnv)
 import System.Exit
-import System.FilePath (addTrailingPathSeparator, (</>))
+import System.FilePath
 import System.IO (hPutStrLn, stderr, openFile, IOMode(AppendMode))
-import System.IO.Error (isDoesNotExistError)
+--import System.IO.Error (isDoesNotExistError)
 import System.Process (callProcess, readProcess)
 import qualified Paths_stackage_sandbox as CabalInfo
 
@@ -44,6 +44,9 @@ data Action
   | Unregister Package
   | Delete (Maybe Snapshot)
   | Upgrade (Maybe Snapshot)
+  | Print PrintOpt
+
+data PrintOpt = PrintShort | PrintFull
 
 data SandboxException
   = NoHomeEnvironmentVariable
@@ -97,6 +100,9 @@ deleteDesc = "Deletes cabal.config and cabal.sandbox.config. "
 upgradeDesc :: String
 upgradeDesc = "Upgrade to the given SNAPSHOT. Defaults to the latest LTS."
 
+printDesc :: String
+printDesc = "Print the sandbox currently in use"
+
 subcommands = do
   addCommand "init" "Init" Init (optional snapshotParser)
   addCommand "package-db" packageDbDesc (const PackageDb) (pure ())
@@ -104,6 +110,11 @@ subcommands = do
   addCommand "unregister" unregisterDesc Unregister packageParser
   addCommand "delete" deleteDesc Delete (optional snapshotParser)
   addCommand "upgrade" upgradeDesc Upgrade (optional snapshotParser)
+  addCommand "print" printDesc Print printOptParser
+
+printOptParser :: Parser PrintOpt
+printOptParser = flag PrintShort PrintFull $
+  long "full-path"
 
 cabalSandboxInit :: FilePath -> IO ()
 cabalSandboxInit dir = do
@@ -479,6 +490,20 @@ versionParser
   <?> "versionParser"
 -}
 
+sandboxPrint :: PrintOpt -> IO ()
+sandboxPrint printOpt = do
+  packageDbText <- getPackageDb
+  let path = takeDirectory  $ dropTrailingPathSeparator $ T.unpack packageDbText
+  case printOpt of
+    PrintFull -> putStrLn path
+    PrintShort -> do
+      let sandbox = takeFileName path
+          preSandbox = takeDirectory path
+      sandboxPrefix <- getSandboxPrefix
+      if preSandbox == dropTrailingPathSeparator (T.unpack sandboxPrefix)
+        then putStrLn sandbox
+        else putStrLn path
+
 handleSandboxExceptions :: SandboxException -> IO ()
 handleSandboxExceptions NoHomeEnvironmentVariable = do
   hPutStrLn stderr "Couldn't find the HOME environment variable"
@@ -549,5 +574,6 @@ main = do
           Just snapshot -> sandboxDeleteSnapshot snapshot
           Nothing -> sandboxDelete
         Upgrade mSnapshot -> sandboxUpgrade mSnapshot
+        Print printOpt -> sandboxPrint printOpt
   go `catch` handleSandboxExceptions
      `catch` handlePluginExceptions
