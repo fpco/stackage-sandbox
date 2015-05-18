@@ -61,6 +61,7 @@ data SandboxException
   | InvalidSnapshot Snapshot
   | GhcVersionFail
   | PackageDbNotFound
+  | WrongGhc Text Text Snapshot
   deriving (Show, Typeable)
 instance Exception SandboxException
 
@@ -172,6 +173,8 @@ sandboxInit msnapshot = do
   when cabalSandboxConfigExists $ do
     throwIO ConfigAlreadyExists
 
+  verifyGhcCompat msnapshot
+
   cabalConfigExists <- doesFileExist "cabal.config"
   configAdded <- if (not cabalConfigExists)
     then do
@@ -186,6 +189,7 @@ sandboxInit msnapshot = do
     Just s -> throwIO $ SnapshotMismatch s configSnapshot
     Nothing -> return configSnapshot
 
+  -- TODO: MonadLogger
   T.putStrLn $ "Initializing at snapshot: " <> snapshot
 
   dir <- getSnapshotDir snapshot
@@ -504,6 +508,34 @@ sandboxPrint printOpt = do
         then putStrLn sandbox
         else putStrLn path
 
+-- TODO: replace with functionality from stackage-common.
+approxSnapshotFor :: Maybe Snapshot -> IO Snapshot
+approxSnapshotFor Nothing = return "lts"
+approxSnapshotFor (Just s) = return s
+
+-- TODO: replace with functionality from stackage-common.
+approxGhcVersionFor :: Snapshot -> IO Text
+approxGhcVersionFor s =
+  if T.isPrefixOf "lts-2" s || T.isPrefixOf "lts-1" s || T.isPrefixOf "lts-0" s ||
+     T.isPrefixOf "lts/2" s || T.isPrefixOf "lts/1" s || T.isPrefixOf "lts/0" s ||
+     s == "lts" -- assumption: current lts = 2
+    then return "ghc-7.8.4"
+    else
+      case T.stripPrefix "nightly" s of
+        Nothing -> return "ghc-7.8.4" -- Not sure what to do, default to 7.8
+        Just "" -> return "ghc-7.10.1"
+        Just s' | s' < "-2015-05-05" -> return "ghc-7.8.4"
+        Just _ | otherwise -> return "ghc-7.10.1"
+
+verifyGhcCompat :: Maybe Snapshot -> IO ()
+verifyGhcCompat mSnapshot = do
+  ghcVersion <- getGhcVersion
+  snapshot <- approxSnapshotFor mSnapshot
+  ghcVersion' <- approxGhcVersionFor snapshot
+  when (ghcVersion /= ghcVersion') $ do
+    throwIO $ WrongGhc ghcVersion ghcVersion' snapshot
+
+
 handleSandboxExceptions :: SandboxException -> IO ()
 handleSandboxExceptions NoHomeEnvironmentVariable = do
   hPutStrLn stderr "Couldn't find the HOME environment variable"
@@ -548,6 +580,10 @@ handleSandboxExceptions GhcVersionFail = do
   exitFailure
 handleSandboxExceptions PackageDbNotFound = do
   hPutStrLn stderr $ "Couldn't find sandbox package-db"
+  exitFailure
+handleSandboxExceptions (WrongGhc old new snapshot) = do
+  T.hPutStrLn stderr $ "Found " <> old <> " on path"
+  T.hPutStrLn stderr $ "Need  " <> new <> " to use snapshot " <> snapshot
   exitFailure
 
 handlePluginExceptions :: PluginException -> IO ()
