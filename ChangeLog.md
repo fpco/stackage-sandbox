@@ -1,3 +1,7 @@
+## 0.1.4
+
+* Added temporary solution for detecting wrong ghc version on path. (#1)
+
 ## 0.1.3
 
 * Added stk sandbox print (#3)
