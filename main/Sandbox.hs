@@ -133,10 +133,13 @@ parseConfigSnapshot :: IO Snapshot
 parseConfigSnapshot = do
   ls <- T.lines <$> T.readFile "cabal.config"
   let p = "-- Stackage snapshot from: http://www.stackage.org/snapshot/"
+  let p' = "-- Stackage snapshot from: http://www.stackage.org/"
   case ls of
     (l:_) -> case T.stripPrefix p l of
       Just snapshot -> return snapshot
-      Nothing -> throwIO NonStackageCabalConfig
+      Nothing -> case T.stripPrefix p' l of
+        Just snapshot -> return snapshot
+        Nothing -> throwIO NonStackageCabalConfig
     _ -> throwIO EmptyCabalConfig
 
 -- TODO: a stricter check?
