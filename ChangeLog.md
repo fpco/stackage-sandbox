@@ -1,3 +1,7 @@
+## 0.1.5
+
+* Added temporary solution for dealing with changes to stackage.org (#4)
+
 ## 0.1.4
 
 * Added temporary solution for detecting wrong ghc version on path. (#1)
