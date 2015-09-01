@@ -520,15 +520,17 @@ approxSnapshotFor (Just s) = return s
 approxGhcVersionFor :: Snapshot -> IO Text
 approxGhcVersionFor s =
   if T.isPrefixOf "lts-2" s || T.isPrefixOf "lts-1" s || T.isPrefixOf "lts-0" s ||
-     T.isPrefixOf "lts/2" s || T.isPrefixOf "lts/1" s || T.isPrefixOf "lts/0" s ||
-     s == "lts" -- assumption: current lts = 2
+     T.isPrefixOf "lts/2" s || T.isPrefixOf "lts/1" s || T.isPrefixOf "lts/0" s 
     then return "ghc-7.8.4"
-    else
-      case T.stripPrefix "nightly" s of
-        Nothing -> return "ghc-7.8.4" -- Not sure what to do, default to 7.8
-        Just "" -> return "ghc-7.10.1"
-        Just s' | s' < "-2015-05-05" -> return "ghc-7.8.4"
-        Just _ | otherwise -> return "ghc-7.10.1"
+    else if T.isPrefixOf "lts-3" s || T.isPrefixOf "lts/3" s ||
+            s == "lts" -- assumption: current lts = 3
+      then return "ghc-7.10.2"
+      else
+        case T.stripPrefix "nightly" s of
+          Nothing -> return "ghc-7.8.4" -- Not sure what to do, default to 7.8
+          Just "" -> return "ghc-7.10.2"
+          Just s' | s' < "-2015-05-05" -> return "ghc-7.8.4"
+          Just _ | otherwise -> return "ghc-7.10.2"
 
 verifyGhcCompat :: Maybe Snapshot -> IO ()
 verifyGhcCompat mSnapshot = do
