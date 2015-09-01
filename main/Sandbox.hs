@@ -530,6 +530,7 @@ approxGhcVersionFor s =
           Nothing -> return "ghc-7.8.4" -- Not sure what to do, default to 7.8
           Just "" -> return "ghc-7.10.2"
           Just s' | s' < "-2015-05-05" -> return "ghc-7.8.4"
+          Just s' | s' < "-2015-08-06" -> return "ghc-7.10.1"
           Just _ | otherwise -> return "ghc-7.10.2"
 
 verifyGhcCompat :: Maybe Snapshot -> IO ()
